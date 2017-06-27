@@ -1,11 +1,11 @@
-module KFlows
+module KFuddles
 
 using Knet
 using AutoGrad
 using Compat
 using JLD
 
-export KFlow, Linear, Conv, DeConv, BatchNorm
+export KFuddle, Linear, Conv, DeConv, BatchNorm
 export weights, @sequence
 export softmax, leaky_relu
 
@@ -19,39 +19,54 @@ end
 leaky_relu(x, slope=0.2) =  max(x, slope*x)
 
 
+abstract KFuddle
+weights(l::KFuddle) = Any[]
+weights(ls::Array{KFuddle}) = vcat([weights(l) for l in ls]...)
+(layers::Array{KFuddle})(x; kw...) = foldl((x,l)->l(weights(l), x;kw...), x, layers)
+(layers::Array{KFuddle})(w, x; kw...) = foldl((x,l)->l(w, x;kw...), x, layers)
 
-abstract KFlow
-weights(l::KFlow) = Any[]
-weights(ls::Array{KFlow}) = vcat([weights(l) for l in ls]...)
-(layers::Array{KFlow})(x; kw...) = foldl((x,l)->l(weights(l), x;kw...), x, layers)
-(layers::Array{KFlow})(w, x; kw...) = foldl((x,l)->l(w, x;kw...), x, layers)
-
-function save_snapshot(f::String, ls::Array{KFlow})
+function save_snapshot(f::String, ls::Array{KFuddle})
   data = Dict{String, Array}()
   for l in ls
     w = weights(l)
     if length(w)==2
-      data["$(l.name)_W"] = w[1]
-      data["$(l.name)_b"] = w[2]
+      data["$(l.name)_W"] = convert(Array, w[1])
+      data["$(l.name)_b"] = convert(Array, w[2])
     end
   end
   save(f, data)
 end
 
-# Allow unary functions to automatically be KFlows
-immutable Unary{F} <: KFlow f::F end
-Base.convert{F<:Function}(::Type{KFlow}, f::F) = Unary(f)
+function load_snapshot(f::String, ls::Array{KFuddle})
+  data = load(f)
+  for l in ls
+    w = weights(l)
+    if length(w)==2
+      T = eltype(w[1])
+      if isa(w[1], KnetArray)
+        atype = KnetArray{T}
+      else
+        atype = Array{T}
+      end
+      w[1] = convert(atype, data["$(l.name)_W"])
+      w[2] = convert(atype, data["$(l.name)_b"])
+    end
+  end
+end
+
+# Allow unary functions to automatically be KFuddles
+immutable Unary{F} <: KFuddle f::F end
+Base.convert{F<:Function}(::Type{KFuddle}, f::F) = Unary(f)
 Base.convert{F<:Function}(::Type{Unary}, f::F) = Unary{F}(f)
 @compat (a::Unary)(w, x; kw...) = a.f(x)
 
 
-
-Knet.grad(layers::Array{KFlow}) = Knet.grad(
+Knet.grad(layers::Array{KFuddle}) = Knet.grad(
   (w, x; kw...)->foldl((x,l)->l(w, x; kw...), x, layers)
 )
 
 
-# Build a sequency of Flows
+# Build a sequency of Fuddles
 function sequence_(e::Expr)
   if e.head in (:block, :const, :global)
     return Expr(e.head, map(sequence_, e.args)...)
@@ -77,8 +92,8 @@ end
 
 # Helper functions to automatically name flows based on the sequency name
 
-name!(n::KFlow, s::AbstractString) = (n.name = @compat String(s); n)
-function name!(f::KFlow, name)
+name!(n::KFuddle, s::AbstractString) = (n.name = @compat String(s); n)
+function name!(f::KFuddle, name)
   if :name in fieldnames(f)
     f.name = name
   end
@@ -93,7 +108,7 @@ function name!(f::KFlow, name)
   f
 end
 
-function name!(flows::Vector{KFlow}, basename)
+function name!(flows::Vector{KFuddle}, basename)
   i = 1
   k = 1
   for flow in flows
@@ -111,11 +126,11 @@ function name!(flows::Vector{KFlow}, basename)
   flows
 end
 
-# KFlow Blocks
+# KFuddle Blocks
 kzeros{T}(::Type{T}, s::Vararg{Int}) = KnetArray(zeros(T, s...))
 kones{T}(::Type{T}, s::Vararg{Int}) = KnetArray(ones(T, s...))
 
-type Linear <: KFlow
+type Linear <: KFuddle
   name
   W
   b
@@ -129,7 +144,7 @@ weights(l::Linear) = (w=Array(Any, 2); w[1]=l.W; w[2]=l.b; w)
 (l::Linear)(w, x; kw...) = w[l.i_W]*x .+ w[l.i_b]
 
 
-type Conv <: KFlow
+type Conv <: KFuddle
   name
   W
   b
@@ -144,7 +159,7 @@ weights(l::Conv) = (w=Array(Any, 2); w[1]=l.W; w[2]=l.b; w)
 (l::Conv)(w, x; kw...) = conv4(w[l.i_W], x; l.kw...) .+ w[l.i_b]
 
 
-type DeConv <: KFlow
+type DeConv <: KFuddle
   name
   W
   b
@@ -162,7 +177,7 @@ weights(l::DeConv) = (w=Array(Any, 2); w[1]=l.W; w[2]=l.b; w)
 # Batch Normalization Layer
 # works both for convolutional and fully connected layers
 # mode, 0=>train, 1=>test
-type BatchNorm <: KFlow
+type BatchNorm <: KFuddle
   name
   W
   b
@@ -188,9 +203,9 @@ end
 function BatchNorm{T}(W::KnetArray{T}; ϵ=1e-5, kw...)
   # W = kones(T, s)
   s = size(W)
-  b = kzeros(T, s)
-  μ = kzeros(T, s)
-  σ = kones(T, s)
+  b = kzeros(T, s...)
+  μ = kzeros(T, s...)
+  σ = kones(T, s...)
   BatchNorm(W, b, μ, σ; kw...)
 end
 weights(l::BatchNorm) = (w=Array(Any, 2); w[1]=l.W; w[2]=l.b; w)
@@ -204,14 +219,15 @@ function (l::BatchNorm)(w, x; mode=1, kw...)
     x0 = x .- mu
     x1 = x0 .* x0
     sigma = sqrt(l.ϵ + (sum(x1, d)) / s)
+    
+    # we need getval in backpropagation
+    l.μ = 0.1*AutoGrad.getval(mu) + 0.9*l.μ
+    l.σ = 0.1*AutoGrad.getval(sigma) + 0.9*l.σ
   elseif mode == 1
     mu = l.μ
     sigma = l.σ
   end
 
-  # we need getval in backpropagation
-  l.μ = 0.1 * AutoGrad.getval(mu) + 0.9*l.μ
-  l.σ = 0.1 * AutoGrad.getval(sigma) + 0.9*l.σ
   xhat = (x.-mu) ./ sigma
   return w[l.i_W] .* xhat .+ w[l.i_b]
 end
