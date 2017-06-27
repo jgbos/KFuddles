@@ -16,11 +16,11 @@ const atype = KnetArray{Float32}
 @sequence predict = KFuddle[
     Conv(convert(atype, xavier(5, 5, 1, 20))),
     relu,
-    padding,
+    pool,
 
     Conv(convert(atype, xavier(5, 5, 20, 50))),
     relu,
-    padding,
+    pool,
     
     mat,
     
