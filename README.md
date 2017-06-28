@@ -10,42 +10,43 @@
           --Adapted from Dr. Seuss, On Beyond Zebra
 
 ## Usage
-```julia
-const atype = KnetArray{Float32}
 
+First define a sequence:
+
+```julia
 @sequence predict = KFuddle[
-    Conv(convert(atype, xavier(5, 5, 1, 20))),
-    relu,
+    Conv(xavier(5, 5, 1, 20)), # Initializes bias vector with zeros
+    relu, # unary functions can be used in place
     pool,
 
-    Conv(convert(atype, xavier(5, 5, 20, 50))),
+    Conv(xavier(5, 5, 20, 50)),
     relu,
     pool,
     
     mat,
     
-    Linear(convert(atype, xavier(500, 800))),
+    Linear(xavier(500, 800)),
     relu,
     
-    Linear(convert(atype, xavier(10, 500)))
+    Linear(xavier(10, 500))
 ]
-
- function loss(w,x,ygold)
-     ypred = predict(w,x)
-     ynorm = logp(ypred,1)  # ypred .- log(sum(exp(ypred),1))
-     -sum(ygold .* ynorm) / size(ygold,2)
- end
- 
- w = weights(predict)
- o = [Adam() for i in w]
- lossgrad = grad(loss)
- 
- function train(w, data; lr=.1, epochs=3, iters=1800)
-     for epoch=1:epochs
-         for (x,y) in data
-             g = lossgradient(w, x, y)             
-             update!(w, g, o)
-         end
-     end
- end
 ```
+
+The variable `predict` is a function and weight container.  To get the weights,
+
+```julia
+w = weights(predict)
+```
+Execute `predict` for a given feature matrix,
+
+```julia
+p = predict(w, x)
+```
+
+Additionally, the parameter layers are automatically labeled so that you can easily save and load snapshot, 
+
+```julia
+save_snapshot("weights.jld", predict)
+load_snapshot("weights.jld", predict)
+```
+
