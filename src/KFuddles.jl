@@ -18,12 +18,19 @@ end
 
 leaky_relu(x, slope=0.2) =  max(x, slope*x)
 
+"""
+Sigmoid Cross Entropy Loss
+input: un-normalized probabilities (z) and binary class label (y)
+"""
+sigm_cross_entropy(z, y) = max(z, 0) - z .* y + log1p(exp(-abs(z)))
 
 abstract KFuddle
 weights(l::KFuddle) = Any[]
 weights(ls::Array{KFuddle}) = vcat([weights(l) for l in ls]...)
 (layers::Array{KFuddle})(x; kw...) = foldl((x,l)->l(weights(l), x;kw...), x, layers)
 (layers::Array{KFuddle})(w, x; kw...) = foldl((x,l)->l(w, x;kw...), x, layers)
+#Base.length(ls::Array{KFuddle}) = sum([length(l) for l in ls])
+#Base.length(l::KFuddle) = 2 # TODO: might want to ensure a layer can turn off bias
 
 function save_snapshot(f::String, ls::Array{KFuddle})
   data = Dict{String, Array}()
@@ -48,8 +55,8 @@ function load_snapshot(f::String, ls::Array{KFuddle})
       else
         atype = Array{T}
       end
-      w[1] = convert(atype, data["$(l.name)_W"])
-      w[2] = convert(atype, data["$(l.name)_b"])
+      l.W = convert(atype, data["$(l.name)_W"])
+      l.b = convert(atype, data["$(l.name)_b"])
     end
   end
 end
@@ -59,7 +66,7 @@ immutable Unary{F} <: KFuddle f::F end
 Base.convert{F<:Function}(::Type{KFuddle}, f::F) = Unary(f)
 Base.convert{F<:Function}(::Type{Unary}, f::F) = Unary{F}(f)
 @compat (a::Unary)(w, x; kw...) = a.f(x)
-
+#Base.length(l::Unary) = 0
 
 Knet.grad(layers::Array{KFuddle}) = Knet.grad(
   (w, x; kw...)->foldl((x,l)->l(w, x; kw...), x, layers)
@@ -143,7 +150,6 @@ Linear{T}(W::KnetArray{T}) =  Linear(W, kzeros(T, size(W,1),1))
 weights(l::Linear) = (w=Array(Any, 2); w[1]=l.W; w[2]=l.b; w)
 (l::Linear)(w, x; kw...) = w[l.i_W]*x .+ w[l.i_b]
 
-
 type Conv <: KFuddle
   name
   W
@@ -153,8 +159,8 @@ type Conv <: KFuddle
   kw
 end
 Conv(W, b; kw...) = name!(Conv("", W, b, 1, 2, kw), "conv")
-Conv{T}(W::Array{T}; kw...) = Conv(W, zeros(T, 1, 1, size(W,4),1); kw...)
-Conv{T}(W::KnetArray{T}; kw...) = Conv(W, kzeros(T, 1, 1, size(W,4),1); kw...)
+Conv{T}(W::Array{T}; kw...) = Conv(W, zeros(T, ones(Int, ndims(W)-2)..., size(W,ndims(W)),1); kw...)
+Conv{T}(W::KnetArray{T}; kw...) = Conv(W, kzeros(T, ones(Int, ndims(W)-2)..., size(W,ndims(W)),1); kw...)
 weights(l::Conv) = (w=Array(Any, 2); w[1]=l.W; w[2]=l.b; w)
 (l::Conv)(w, x; kw...) = conv4(w[l.i_W], x; l.kw...) .+ w[l.i_b]
 
@@ -168,8 +174,8 @@ type DeConv <: KFuddle
   kw
 end
 DeConv(W, b; kw...) = name!(DeConv("", W, b, 1, 2, kw), "deconv")
-DeConv{T}(W::Array{T}; kw...) = DeConv(W, zeros(T, 1, 1, size(W,3),1); kw...)
-DeConv{T}(W::KnetArray{T}; kw...) = DeConv(W, kzeros(T, 1, 1, size(W,3),1); kw...)
+DeConv{T}(W::Array{T}; kw...) = DeConv(W, zeros(T, ones(Int, ndims(W)-2)..., size(W,ndims(W)-1),1); kw...)
+DeConv{T}(W::KnetArray{T}; kw...) = DeConv(W, kzeros(T, ones(Int, ndims(W)-2)..., size(W,ndims(W)-1),1); kw...)
 weights(l::DeConv) = (w=Array(Any, 2); w[1]=l.W; w[2]=l.b; w)
 (l::DeConv)(w, x; kw...) = deconv4(w[l.i_W], x; l.kw...) .+ w[l.i_b]
 
@@ -193,7 +199,6 @@ function BatchNorm(W, b, μ, σ; ϵ=1e-5, kw...)
 end
 
 function BatchNorm{T}(W::Array{T}; kw...)
-  # W = ones(T, s)
   s = size(W)
   b = zeros(T, s)
   μ = zeros(T, s)
@@ -201,7 +206,6 @@ function BatchNorm{T}(W::Array{T}; kw...)
   BatchNorm(W, b, μ, σ; kw...)
 end
 function BatchNorm{T}(W::KnetArray{T}; ϵ=1e-5, kw...)
-  # W = kones(T, s)
   s = size(W)
   b = kzeros(T, s...)
   μ = kzeros(T, s...)
@@ -219,7 +223,7 @@ function (l::BatchNorm)(w, x; mode=1, kw...)
     x0 = x .- mu
     x1 = x0 .* x0
     sigma = sqrt(l.ϵ + (sum(x1, d)) / s)
-    
+
     # we need getval in backpropagation
     l.μ = 0.1*AutoGrad.getval(mu) + 0.9*l.μ
     l.σ = 0.1*AutoGrad.getval(sigma) + 0.9*l.σ
