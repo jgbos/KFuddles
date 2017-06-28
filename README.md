@@ -43,7 +43,7 @@ Execute `predict` for a given feature matrix,
 p = predict(w, x)
 ```
 
-Additionally, the parameter layers are automatically labeled so that you can easily save and load snapshot, 
+Additionally, the parameter layers are automatically labeled so that you can easily save and load snapshots, 
 
 ```julia
 save_snapshot("weights.jld", predict)
