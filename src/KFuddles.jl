@@ -6,9 +6,8 @@ using Compat
 using JLD
 
 export KFuddle, Linear, Conv, DeConv, BatchNorm
-export weights, @sequence
-export softmax, leaky_relu
-
+export nparams, weights, @sequence
+export softmax, leaky_relu, sigm_cross_entropy
 
 softmax(x,dim) = let
   m = maximum(x)
@@ -29,8 +28,8 @@ weights(l::KFuddle) = Any[]
 weights(ls::Array{KFuddle}) = vcat([weights(l) for l in ls]...)
 (layers::Array{KFuddle})(x; kw...) = foldl((x,l)->l(weights(l), x;kw...), x, layers)
 (layers::Array{KFuddle})(w, x; kw...) = foldl((x,l)->l(w, x;kw...), x, layers)
-#Base.length(ls::Array{KFuddle}) = sum([length(l) for l in ls])
-#Base.length(l::KFuddle) = 2 # TODO: might want to ensure a layer can turn off bias
+nparams(ls::Array{KFuddle}) = sum([nparams(l) for l in ls])
+nparams(l::KFuddle) = 2 # TODO: might want to ensure a layer can turn off bias
 
 function save_snapshot(f::String, ls::Array{KFuddle})
   data = Dict{String, Array}()
@@ -66,7 +65,7 @@ immutable Unary{F} <: KFuddle f::F end
 Base.convert{F<:Function}(::Type{KFuddle}, f::F) = Unary(f)
 Base.convert{F<:Function}(::Type{Unary}, f::F) = Unary{F}(f)
 @compat (a::Unary)(w, x; kw...) = a.f(x)
-#Base.length(l::Unary) = 0
+nparams(l::Unary) = 0
 
 Knet.grad(layers::Array{KFuddle}) = Knet.grad(
   (w, x; kw...)->foldl((x,l)->l(w, x; kw...), x, layers)
