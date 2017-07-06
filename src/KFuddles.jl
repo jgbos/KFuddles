@@ -5,7 +5,7 @@ using AutoGrad
 using Compat
 using JLD
 
-export KFuddle, Linear, Conv, DeConv, BatchNorm
+export KFuddle, Linear, Conv, DeConv, BatchNorm, LSTM
 export nparams, weights, @sequence
 export softmax, leaky_relu, sigm_cross_entropy
 
