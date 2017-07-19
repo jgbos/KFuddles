@@ -5,9 +5,11 @@ using AutoGrad
 using Compat
 using JLD
 
-export KFuddle, Linear, Conv, DeConv, BatchNorm, LSTM
+export Fuddle, Linear, Conv, DeConv, BatchNorm, LSTM
+export Sequence, ResidualBlock
 export nparams, weights, @sequence
 export softmax, leaky_relu, sigm_cross_entropy
+export receptive_field, transform_size
 
 softmax(x,dim) = let
   m = maximum(x)
@@ -25,15 +27,27 @@ sigm_cross_entropy(z, y) = max(z, 0) .- z .* y .+ log1p(exp(-abs(z)))
 
 
 
-abstract KFuddle
-weights(l::KFuddle) = Any[]
-weights(ls::Array{KFuddle}) = vcat([weights(l) for l in ls]...)
-(layers::Array{KFuddle})(x; kw...) = foldl((x,l)->l(weights(l), x;kw...), x, layers)
-(layers::Array{KFuddle})(w, x; kw...) = foldl((x,l)->l(w, x;kw...), x, layers)
-nparams(ls::Array{KFuddle}) = sum([nparams(l) for l in ls])
-nparams(l::KFuddle) = 2 # TODO: might want to ensure a layer can turn off bias
+abstract Fuddle
 
-function save_snapshot(f::String, ls::Array{KFuddle})
+
+
+weights(l::Fuddle) = Any[]
+weights(ls::Array{Fuddle}) = vcat([weights(l) for l in ls]...)
+#(layers::Array{Fuddle})(x; kw...) = foldl((x,l)->l(weights(l), x;kw...), x, layers)
+nparams(ls::Array{Fuddle}) = sum([nparams(l) for l in ls])
+nparams(l::Fuddle) = 2 # TODO: might want to ensure a layer can turn off bias
+
+function (layers::Array{Fuddle})(w, x; resblock=false, kw...)
+  if !resblock
+    return foldl((x,l)->l(w, x;kw...), x, layers)
+  else
+    Fx = foldl((x,l)->l(w, x;kw...), x, layers[1:end-1])
+    return Fx + layers[end](w, x)
+  end
+end
+
+
+function save_snapshot(f::String, ls::Array{Fuddle})
   data = Dict{String, Array}()
   for l in ls
     w = weights(l)
@@ -45,7 +59,7 @@ function save_snapshot(f::String, ls::Array{KFuddle})
   save(f, data)
 end
 
-function load_snapshot(f::String, ls::Array{KFuddle})
+function load_snapshot(f::String, ls::Array{Fuddle})
   data = load(f)
   for l in ls
     w = weights(l)
@@ -62,14 +76,14 @@ function load_snapshot(f::String, ls::Array{KFuddle})
   end
 end
 
-# Allow unary functions to automatically be KFuddles
-immutable Unary{F} <: KFuddle f::F end
-Base.convert{F<:Function}(::Type{KFuddle}, f::F) = Unary(f)
+# Allow unary functions to automatically be Fuddles
+immutable Unary{F} <: Fuddle f::F end
+Base.convert{F<:Function}(::Type{Fuddle}, f::F) = Unary(f)
 Base.convert{F<:Function}(::Type{Unary}, f::F) = Unary{F}(f)
 @compat (a::Unary)(w, x; kw...) = a.f(x)
 nparams(l::Unary) = 0
 
-Knet.grad(layers::Array{KFuddle}) = Knet.grad(
+Knet.grad(layers::Array{Fuddle}) = Knet.grad(
   (w, x; kw...)->foldl((x,l)->l(w, x; kw...), x, layers)
 )
 
@@ -98,10 +112,10 @@ macro sequence(arg...)
   end
 end
 
-# Helper functions to automatically name flows based on the sequency name
+# Helper functions to automatically name fuddles based on the sequency name
 
-name!(n::KFuddle, s::AbstractString) = (n.name = @compat String(s); n)
-function name!(f::KFuddle, name)
+name!(n::Fuddle, s::AbstractString) = (n.name = @compat String(s); n)
+function name!(f::Fuddle, name)
   if :name in fieldnames(f)
     f.name = name
   end
@@ -116,92 +130,139 @@ function name!(f::KFuddle, name)
   f
 end
 
-function name!(flows::Vector{KFuddle}, basename)
+function name!(fuddles::Vector{Fuddle}, basename)
   i = 1
   k = 1
   h = 1
-  for flow in flows
-    if :name in fieldnames(flow)
-      name!(flow, string(basename, "_", k))
+  for fuddle in fuddles
+    if :name in fieldnames(fuddle)
+      name!(fuddle, string(basename, "_", k))
       k += 1
     end
 
-    if :i_W in fieldnames(flow)
-      flow.i_W = 2i - 1
-      flow.i_b = 2i
-      i += 1
+    if :i_W in fieldnames(fuddle)
+      fuddle.i_W = i #2i - 1
+      # fuddle.i_b = 2i
+      i += nparams(fuddle)
     end
 
-    if :i_h in fieldnames(flow)
-      flow.i_h = h
+    if :i_h in fieldnames(fuddle)
+      fuddle.i_h = h
       h += 1
     end
   end
-  flows
+  fuddles
 end
 
-# KFuddle Blocks
 kzeros{T}(::Type{T}, s::Vararg{Int}) = KnetArray(zeros(T, s...))
 kones{T}(::Type{T}, s::Vararg{Int}) = KnetArray(ones(T, s...))
 
-type Linear <: KFuddle
+# ResidualBlock
+type ResidualBlock <: Fuddle
+  name
+  layers::Array{Fuddle}
+  i_W
+  # i_b
+end
+ResidualBlock(layers) =  name!(ResidualBlock("", layers, 1), "resblock")
+weights(r::ResidualBlock) = vcat([weights(l) for l in r.layers]...)
+nparams(r::ResidualBlock) = sum([nparams(l) for l in r.layers])
+function (r::ResidualBlock)(w, x; kw...)
+  k = 0
+  for l in r.layers
+    if :i_W in fieldnames(l)
+      l.i_W = r.i_W + k
+      k += nparams(l)
+    end
+  end
+
+  Fx = foldl((x,l)->l(w, x;kw...), x, r.layers[1:end-1])
+  return Fx + r.layers[end](w, x)
+end
+
+# Fuddle Blocks
+type Linear <: Fuddle
   name
   W
   b
   i_W
-  i_b
+  # i_b
 end
-Linear(W, b) =  name!(Linear("", W, b, 1, 2), "linear")
+Linear(W, b) =  name!(Linear("", W, b, 1), "linear")
 Linear{T}(W::Array{T}) =  Linear(W, zeros(T, size(W,1),1))
 Linear{T}(W::KnetArray{T}) =  Linear(W, kzeros(T, size(W,1),1))
 weights(l::Linear) = (w=Array(Any, 2); w[1]=l.W; w[2]=l.b; w)
-(l::Linear)(w, x; kw...) = w[l.i_W]*x .+ w[l.i_b]
+(l::Linear)(w, x; kw...) = w[l.i_W]*x .+ w[l.i_W+1]
 
-type Conv <: KFuddle
+transform_size(l::Linear, args...) = size(l.W, 1)
+
+
+type Conv <: Fuddle
   name
   W
   b
   i_W
-  i_b
+  # i_b
   kw
 end
-Conv(W, b; kw...) = name!(Conv("", W, b, 1, 2, kw), "conv")
+Conv(W, b; kw...) = name!(Conv("", W, b, 1, kw), "conv")
 Conv{T}(W::Array{T}; kw...) = Conv(W, zeros(T, ones(Int, ndims(W)-2)..., size(W,ndims(W)),1); kw...)
 Conv{T}(W::KnetArray{T}; kw...) = Conv(W, kzeros(T, ones(Int, ndims(W)-2)..., size(W,ndims(W)),1); kw...)
 weights(l::Conv) = (w=Array(Any, 2); w[1]=l.W; w[2]=l.b; w)
-(l::Conv)(w, x; kw...) = conv4(w[l.i_W], x; l.kw...) .+ w[l.i_b]
+(l::Conv)(w, x; kw...) = conv4(w[l.i_W], x; l.kw...) .+ w[l.i_W+1]
+
+function receptive_field(nin, k, p, s, j=1,r=1,start=0.5)
+  nout = transform_size(Conv, nin, k, p, s)
+  jout = j*s
+  rout = r + (k-1)*j
+  sout = start + ((k-1)/2 - p)*j
+  return (nout, jout, rout, sout)
+end
+transform_size(::Type{Conv}, xin, k, p, s, d=1) = floor(Int, (xin + 2p - k - (k-1)*(d-1))/s) + 1
+function transform_size(l::Conv, xin)
+  p = 0
+  s = 1
+  for (k, v) in l.kw
+    if k==:stride
+      s = v
+    elseif k==:padding
+      p = v
+    end
+  end
+  transform_size(Conv, xin, size(l.W,1), p, s)
+end
 
 
-type DeConv <: KFuddle
+type DeConv <: Fuddle
   name
   W
   b
   i_W
-  i_b
+  # i_b
   kw
 end
-DeConv(W, b; kw...) = name!(DeConv("", W, b, 1, 2, kw), "deconv")
+DeConv(W, b; kw...) = name!(DeConv("", W, b, 1, kw), "deconv")
 DeConv{T}(W::Array{T}; kw...) = DeConv(W, zeros(T, ones(Int, ndims(W)-2)..., size(W,ndims(W)-1),1); kw...)
 DeConv{T}(W::KnetArray{T}; kw...) = DeConv(W, kzeros(T, ones(Int, ndims(W)-2)..., size(W,ndims(W)-1),1); kw...)
 weights(l::DeConv) = (w=Array(Any, 2); w[1]=l.W; w[2]=l.b; w)
-(l::DeConv)(w, x; kw...) = deconv4(w[l.i_W], x; l.kw...) .+ w[l.i_b]
+(l::DeConv)(w, x; kw...) = deconv4(w[l.i_W], x; l.kw...) .+ w[l.i_W+1]
 
 
 # Batch Normalization Layer
 # works both for convolutional and fully connected layers
 # mode, 0=>train, 1=>test
-type BatchNorm <: KFuddle
+type BatchNorm <: Fuddle
   name
   W
   b
   i_W
-  i_b
+  # i_b
   μ
   σ
   ϵ
 end
 function BatchNorm(W, b, μ, σ; ϵ=1e-5, kw...)
-  bn = BatchNorm("", W, b, 1, 2, μ, σ, ϵ)
+  bn = BatchNorm("", W, b, 1, μ, σ, ϵ)
   name!(bn, "batchnorm")
 end
 
@@ -240,25 +301,25 @@ function (l::BatchNorm)(w, x; mode=1, kw...)
   end
 
   xhat = (x.-mu) ./ sigma
-  return w[l.i_W] .* xhat .+ w[l.i_b]
+  return w[l.i_W] .* xhat .+ w[l.i_W+1]
 end
 
-type LSTM <: KFuddle
+type LSTM <: Fuddle
   name
   W
   b
   i_W
-  i_b
+  # i_b
   i_h
 end
-LSTM(W, b) =  name!(LSTM("", W, b, 1, 2, 1), "lstm")
+LSTM(W, b) =  name!(LSTM("", W, b, 1, 1), "lstm")
 LSTM{T}(W::Array{T}) =  LSTM(W, zeros(T, size(W,1),1))
 LSTM{T}(W::KnetArray{T}) =  LSTM(W, kzeros(T, size(W,1),1))
 weights(l::LSTM) = (w=Array(Any, 2); w[1]=l.W; w[2]=l.b; w)
 function (l::LSTM)(w, hcx::NTuple{3, Any}; kw...)
   h, c, x = hcx
   j = l.i_h
-  h[j], c[j] = lstm(w[l.i_W], w[l.i_b], h[j], c[j], x)
+  h[j], c[j] = lstm(w[l.i_W], w[l.i_W+1], h[j], c[j], x)
   return (h, c, h[j])
 end
 
